@@ -1,40 +1,36 @@
-from pathlib import Path
+class Doc:
+    """Define the documentation of a type annotation using `Annotated`, to be
+        used in class attributes, function and method parameters, return values,
+        and variables.
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+    The value should be a positional-only string literal to allow static tools
+    like editors and documentation generators to use it.
 
-from .config import settings
-from .routes.health import router as health_router
-from .routes.chat import router as chat_router
+    This complements docstrings.
 
-BASE_DIR = Path(__file__).resolve().parent.parent  
+    The string value passed is available in the attribute `documentation`.
 
+    Example:
 
-def create_app() -> FastAPI:
-    app = FastAPI(
-        title=settings.app_name,
-        version=settings.version,
-        docs_url="/docs",       
-        redoc_url="/redoc",     
-    )
+    ```Python
+    from typing import Annotated
+    from annotated_doc import Doc
 
-    # Health routes
-    app.include_router(health_router)
+    def hi(name: Annotated[str, Doc("Who to say hi to")]) -> None:
+        print(f"Hi, {name}!")
+    ```
+    """
 
-    # Chat routes (under /api)
-    app.include_router(chat_router)
+    def __init__(self, documentation: str, /) -> None:
+        self.documentation = documentation
 
-    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    async def root():
-        """
-        Serve the main web UI.
-        Later, we could move to templates or a separate frontend build,
-        but this keeps things simple for the hackathon.
-        """
-        index_path = BASE_DIR.parent / "frontend" / "index.html"
-        return index_path.read_text(encoding="utf-8")
+    def __repr__(self) -> str:
+        return f"Doc({self.documentation!r})"
 
-    return app
+    def __hash__(self) -> int:
+        return hash(self.documentation)
 
-
-app = create_app()
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Doc):
+            return NotImplemented
+        return self.documentation == other.documentation

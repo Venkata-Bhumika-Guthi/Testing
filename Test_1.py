@@ -1,4 +1,9 @@
 # Sample Test
-
-def test_sample_addition():
-    assert 1 + 1 == 2
+# this is only for testing
+def two_sum(nums, target):
+    seen = {}
+    for i, num in enumerate(nums):
+        complement = target - num
+        if complement in seen:
+            return [seen[complement], i]
+        seen[num] = i

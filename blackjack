@@ -1,0 +1,47 @@
+import random
+
+def blackjack():
+    deck = [2,3,4,5,6,7,8,9,10,10,10,10,11] * 4
+
+    def hand_value(hand):
+        total = sum(hand)
+        aces = hand.count(11)
+        while total > 21 and aces:
+            total -= 10
+            aces -= 1
+        return total
+
+    def deal():
+        return [random.choice(deck), random.choice(deck)]
+
+    def show(player, dealer, hide=True):
+        print(f"\nDealer: {dealer[0]} + {'?' if hide else dealer[1]} = {dealer[0] if hide else hand_value(dealer)}")
+        print(f"You:    {player} = {hand_value(player)}")
+
+    player = deal()
+    dealer = deal()
+    show(player, dealer)
+
+    while hand_value(player) < 21:
+        move = input("\nHit or Stand? (h/s): ").strip().lower()
+        if move == 'h':
+            player.append(random.choice(deck))
+            show(player, dealer)
+        else:
+            break
+
+    print("\n-- Dealer's turn --")
+    show(player, dealer, hide=False)
+    while hand_value(dealer) < 17:
+        dealer.append(random.choice(deck))
+        show(player, dealer, hide=False)
+
+    p, d = hand_value(player), hand_value(dealer)
+    print("\n--- RESULT ---")
+    if p > 21:             print("You busted! Dealer wins.")
+    elif d > 21:           print("Dealer busted! You win!")
+    elif p > d:            print(f"You win! ({p} vs {d})")
+    elif d > p:            print(f"Dealer wins! ({d} vs {p})")
+    else:                  print(f"Push! It's a tie. ({p})")
+
+blackjack()

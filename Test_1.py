@@ -1,5 +1,5 @@
 # Sample Test
-# this is only for testing
+# extra feature
 def two_sum(nums, target):
     seen = {}
     for i, num in enumerate(nums):

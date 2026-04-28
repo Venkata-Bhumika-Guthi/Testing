@@ -40,7 +40,6 @@ def blackjack():
         dealer = deal()
         show(player, dealer)
 
-        # Blackjack check
         if is_blackjack(player):
             show(player, dealer, hide=False)
             print("\n🂡 BLACKJACK! You win 1.5x!")
@@ -50,7 +49,6 @@ def blackjack():
                 break
             continue
 
-        # Double down option
         doubled = False
         if hand_value(player) in [10, 11] and balance >= bet:
             choice = input("\nDouble down? (y/n): ").lower()
@@ -71,7 +69,7 @@ def blackjack():
 
         print("\n-- Dealer's turn --")
         show(player, dealer, hide=False)
-        while hand_value(dealer) < 17:
+        while hand_value(dealer) < 18:  # ← Dealer now hits until 18 (was 17)
             dealer.append(random.choice(deck))
             show(player, dealer, hide=False)
 

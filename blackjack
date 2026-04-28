@@ -2,6 +2,7 @@ import random
 
 def blackjack():
     deck = [2,3,4,5,6,7,8,9,10,10,10,10,11] * 4
+    balance = 1000
 
     def hand_value(hand):
         total = sum(hand)
@@ -18,30 +19,86 @@ def blackjack():
         print(f"\nDealer: {dealer[0]} + {'?' if hide else dealer[1]} = {dealer[0] if hide else hand_value(dealer)}")
         print(f"You:    {player} = {hand_value(player)}")
 
-    player = deal()
-    dealer = deal()
-    show(player, dealer)
+    def get_bet(balance):
+        while True:
+            try:
+                bet = int(input(f"\nYour balance: ${balance}. Place your bet: $"))
+                if 1 <= bet <= balance:
+                    return bet
+                print(f"Bet must be between $1 and ${balance}.")
+            except ValueError:
+                print("Enter a valid number.")
 
-    while hand_value(player) < 21:
-        move = input("\nHit or Stand? (h/s): ").strip().lower()
-        if move == 'h':
-            player.append(random.choice(deck))
-            show(player, dealer)
+    def is_blackjack(hand):
+        return hand_value(hand) == 21 and len(hand) == 2
+
+    while balance > 0:
+        print("\n" + "=" * 40)
+        bet = get_bet(balance)
+
+        player = deal()
+        dealer = deal()
+        show(player, dealer)
+
+        # Blackjack check
+        if is_blackjack(player):
+            show(player, dealer, hide=False)
+            print("\n🂡 BLACKJACK! You win 1.5x!")
+            balance += int(bet * 1.5)
+            print(f"Balance: ${balance}")
+            if input("\nPlay again? (y/n): ").lower() != 'y':
+                break
+            continue
+
+        # Double down option
+        doubled = False
+        if hand_value(player) in [10, 11] and balance >= bet:
+            choice = input("\nDouble down? (y/n): ").lower()
+            if choice == 'y':
+                bet *= 2
+                player.append(random.choice(deck))
+                show(player, dealer)
+                doubled = True
+
+        if not doubled:
+            while hand_value(player) < 21:
+                move = input("\nHit or Stand? (h/s): ").strip().lower()
+                if move == 'h':
+                    player.append(random.choice(deck))
+                    show(player, dealer)
+                else:
+                    break
+
+        print("\n-- Dealer's turn --")
+        show(player, dealer, hide=False)
+        while hand_value(dealer) < 17:
+            dealer.append(random.choice(deck))
+            show(player, dealer, hide=False)
+
+        p, d = hand_value(player), hand_value(dealer)
+        print("\n--- RESULT ---")
+        if p > 21:
+            print("You busted! Dealer wins.")
+            balance -= bet
+        elif d > 21:
+            print("Dealer busted! You win!")
+            balance += bet
+        elif p > d:
+            print(f"You win! ({p} vs {d})")
+            balance += bet
+        elif d > p:
+            print(f"Dealer wins! ({d} vs {p})")
+            balance -= bet
         else:
+            print(f"Push! It's a tie. ({p})")
+
+        print(f"Balance: ${balance}")
+        if balance == 0:
+            print("\nYou're broke! Game over.")
+            break
+        if input("\nPlay again? (y/n): ").lower() != 'y':
             break
 
-    print("\n-- Dealer's turn --")
-    show(player, dealer, hide=False)
-    while hand_value(dealer) < 17:
-        dealer.append(random.choice(deck))
-        show(player, dealer, hide=False)
-
-    p, d = hand_value(player), hand_value(dealer)
-    print("\n--- RESULT ---")
-    if p > 21:             print("You busted! Dealer wins.")
-    elif d > 21:           print("Dealer busted! You win!")
-    elif p > d:            print(f"You win! ({p} vs {d})")
-    elif d > p:            print(f"Dealer wins! ({d} vs {p})")
-    else:                  print(f"Push! It's a tie. ({p})")
+    print(f"\nFinal balance: ${balance}. Thanks for playing!")
 
 blackjack()

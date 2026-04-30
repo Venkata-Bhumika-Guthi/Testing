@@ -1,6 +1,9 @@
 import hashlib
 import uuid
 import time
+#testing
+#This is for test auto doc
+#Implemented by UK
 
 users_db = {
     "alice": hashlib.sha256("password123".encode()).hexdigest(),

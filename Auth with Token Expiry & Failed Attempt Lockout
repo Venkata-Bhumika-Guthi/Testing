@@ -1,0 +1,90 @@
+import hashlib
+import uuid
+import time
+
+users_db = {
+    "alice": hashlib.sha256("password123".encode()).hexdigest(),
+    "bob":   hashlib.sha256("securepass".encode()).hexdigest(),
+}
+
+active_tokens = {}
+failed_attempts = {}
+
+TOKEN_EXPIRY_SECONDS = 30
+MAX_ATTEMPTS = 3
+LOCKOUT_SECONDS = 60
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def generate_token():
+    return str(uuid.uuid4())
+
+def is_locked_out(username):
+    if username in failed_attempts:
+        attempts, last_time = failed_attempts[username]
+        if attempts >= MAX_ATTEMPTS:
+            if time.time() - last_time < LOCKOUT_SECONDS:
+                remaining = int(LOCKOUT_SECONDS - (time.time() - last_time))
+                return True, remaining
+            else:
+                del failed_attempts[username]
+    return False, 0
+
+def record_failed(username):
+    attempts, _ = failed_attempts.get(username, (0, 0))
+    failed_attempts[username] = (attempts + 1, time.time())
+
+def login(username, password):
+    locked, remaining = is_locked_out(username)
+    if locked:
+        return None, f"Account locked. Try again in {remaining}s."
+    if username not in users_db:
+        return None, "User not found."
+    if users_db[username] != hash_password(password):
+        record_failed(username)
+        attempts = failed_attempts.get(username, (0,))[0]
+        left = MAX_ATTEMPTS - attempts
+        return None, f"Wrong password. {left} attempt(s) left."
+    failed_attempts.pop(username, None)
+    token = generate_token()
+    active_tokens[token] = {"user": username, "created": time.time()}
+    return token, "Login successful."
+
+def logout(token):
+    if token in active_tokens:
+        del active_tokens[token]
+        return "Logged out."
+    return "Invalid token."
+
+def get_current_user(token):
+    if token not in active_tokens:
+        return None, "Invalid token."
+    session = active_tokens[token]
+    if time.time() - session["created"] > TOKEN_EXPIRY_SECONDS:
+        del active_tokens[token]
+        return None, "Session expired. Please log in again."
+    return session["user"], None
+
+def protected_route(token):
+    user, error = get_current_user(token)
+    if error:
+        return f"Access denied: {error}"
+    return f"Welcome, {user}! You accessed a protected resource."
+
+# --- Run ---
+token, msg = login("alice", "wrongpass")
+print(msg)
+token, msg = login("alice", "wrongpass")
+print(msg)
+token, msg = login("alice", "wrongpass")
+print(msg)
+token, msg = login("alice", "password123")
+print(msg)
+
+token, msg = login("bob", "securepass")
+print(msg)
+print(protected_route(token))
+print(f"\nWaiting for token to expire ({TOKEN_EXPIRY_SECONDS}s)...")
+time.sleep(TOKEN_EXPIRY_SECONDS + 1)
+print(protected_route(token))

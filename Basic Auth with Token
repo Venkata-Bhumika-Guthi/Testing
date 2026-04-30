@@ -1,0 +1,47 @@
+import hashlib
+import uuid
+import time
+
+users_db = {
+    "alice": hashlib.sha256("password123".encode()).hexdigest(),
+    "bob":   hashlib.sha256("securepass".encode()).hexdigest(),
+}
+
+active_tokens = {}
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def generate_token():
+    return str(uuid.uuid4())
+
+def login(username, password):
+    if username not in users_db:
+        return None, "User not found."
+    if users_db[username] != hash_password(password):
+        return None, "Wrong password."
+    token = generate_token()
+    active_tokens[token] = username
+    return token, "Login successful."
+
+def logout(token):
+    if token in active_tokens:
+        del active_tokens[token]
+        return "Logged out."
+    return "Invalid token."
+
+def get_current_user(token):
+    return active_tokens.get(token, None)
+
+def protected_route(token):
+    user = get_current_user(token)
+    if not user:
+        return "Access denied. Please log in."
+    return f"Welcome, {user}! You accessed a protected resource."
+
+# --- Run ---
+token, msg = login("alice", "password123")
+print(msg)
+print(protected_route(token))
+print(logout(token))
+print(protected_route(token))

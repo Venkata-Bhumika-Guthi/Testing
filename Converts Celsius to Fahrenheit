@@ -1,0 +1,7 @@
+def celsius_to_all(c):
+    print(f"Celsius:    {c}°C")
+    print(f"Fahrenheit: {c * 9/5 + 32}°F")
+    print(f"Kelvin:     {c + 273.15}K")
+
+celsius_to_all(100)
+#Converts Celsius to Fahrenheit and Kelvin in one shot.

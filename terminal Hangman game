@@ -1,0 +1,21 @@
+import random
+
+word = random.choice(["python", "keyboard", "monitor", "function", "variable"])
+guessed = set()
+lives = 6
+
+while lives > 0:
+    display = " ".join(c if c in guessed else "_" for c in word)
+    print(f"\n{display}  ❤️ x{lives}")
+    if "_" not in display:
+        print("You won!"); break
+    guess = input("Guess a letter: ").lower()
+    if guess in guessed:
+        print("Already guessed!")
+    elif guess in word:
+        guessed.add(guess)
+    else:
+        lives -= 1
+        print(f"Wrong! -{1} life")
+else:
+    print(f"\nGame over! The word was: {word}")

@@ -1,0 +1,608 @@
+#!/usr/bin/env python3
+"""
+taskman.py — A production-grade CLI task manager.
+
+Features:
+  • Persistent JSON storage with atomic writes
+  • Full CRUD with filtering, priority, and due dates
+  • Structured logging (file + stderr)
+  • Rich terminal output with color/unicode
+  • Input validation and typed data model
+  • Graceful error handling throughout
+
+Usage:
+  python taskman.py add "Buy groceries" --priority high --due 2026-05-20
+  python taskman.py list
+  python taskman.py list --status pending --priority high
+  python taskman.py done <id>
+  python taskman.py delete <id>
+  python taskman.py edit <id> --title "New title" --priority low
+  python taskman.py clear --force
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+import tempfile
+import uuid
+from dataclasses import asdict, dataclass, field
+from datetime import date, datetime
+from enum import Enum
+from pathlib import Path
+from typing import Optional
+
+# ──────────────────────────────────────────────────────────────
+# Constants & Paths
+# ──────────────────────────────────────────────────────────────
+
+APP_NAME = "taskman"
+DATA_DIR = Path.home() / f".{APP_NAME}"
+DATA_FILE = DATA_DIR / "tasks.json"
+LOG_FILE = DATA_DIR / "taskman.log"
+DATA_VERSION = 1
+
+
+# ──────────────────────────────────────────────────────────────
+# Logging Setup
+# ──────────────────────────────────────────────────────────────
+
+def _setup_logging() -> logging.Logger:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger(APP_NAME)
+    logger.setLevel(logging.DEBUG)
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+
+    sh = logging.StreamHandler(sys.stderr)
+    sh.setLevel(logging.WARNING)
+    sh.setFormatter(fmt)
+
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+    return logger
+
+
+log = _setup_logging()
+
+
+# ──────────────────────────────────────────────────────────────
+# Domain Model
+# ──────────────────────────────────────────────────────────────
+
+class Priority(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class Status(str, Enum):
+    PENDING = "pending"
+    DONE = "done"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@dataclass
+class Task:
+    title: str
+    priority: Priority = Priority.MEDIUM
+    status: Status = Status.PENDING
+    due: Optional[str] = None          # ISO date string "YYYY-MM-DD"
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    created_at: str = field(
+        default_factory=lambda: datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
+    )
+    updated_at: str = field(
+        default_factory=lambda: datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
+    )
+
+    # ── validation ────────────────────────────────────────────
+
+    def __post_init__(self) -> None:
+        self._validate()
+
+    def _validate(self) -> None:
+        title = self.title.strip()
+        if not title:
+            raise ValueError("Task title cannot be empty.")
+        if len(title) > 200:
+            raise ValueError("Task title must be ≤ 200 characters.")
+        self.title = title
+
+        if isinstance(self.priority, str):
+            try:
+                self.priority = Priority(self.priority)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid priority '{self.priority}'. Choose: low, medium, high."
+                )
+
+        if isinstance(self.status, str):
+            try:
+                self.status = Status(self.status)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid status '{self.status}'. Choose: pending, done."
+                )
+
+        if self.due is not None:
+            try:
+                date.fromisoformat(self.due)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid due date '{self.due}'. Expected format: YYYY-MM-DD."
+                )
+
+    # ── serialization ─────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["priority"] = self.priority.value
+        d["status"] = self.status.value
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Task":
+        return cls(**data)
+
+    def mark_updated(self) -> None:
+        self.updated_at = datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
+
+    def is_overdue(self) -> bool:
+        if self.due is None or self.status == Status.DONE:
+            return False
+        return date.fromisoformat(self.due) < date.today()
+
+
+# ──────────────────────────────────────────────────────────────
+# Storage Layer  (atomic writes, schema versioning)
+# ──────────────────────────────────────────────────────────────
+
+class Storage:
+    """Thread-unsafe but process-safe via atomic rename."""
+
+    def __init__(self, path: Path = DATA_FILE) -> None:
+        self._path = path
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def load(self) -> list[Task]:
+        if not self._path.exists():
+            log.debug("No data file found; starting fresh.")
+            return []
+        try:
+            raw = self._path.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as exc:
+            log.error("Failed to read data file: %s", exc)
+            raise RuntimeError(f"Cannot read task data: {exc}") from exc
+
+        if payload.get("version") != DATA_VERSION:
+            log.warning("Data file version mismatch — attempting migration.")
+
+        tasks: list[Task] = []
+        for item in payload.get("tasks", []):
+            try:
+                tasks.append(Task.from_dict(item))
+            except (TypeError, ValueError) as exc:
+                log.warning("Skipping corrupt task entry: %s — %s", item, exc)
+        return tasks
+
+    def save(self, tasks: list[Task]) -> None:
+        payload = {
+            "version": DATA_VERSION,
+            "saved_at": datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") + "Z",
+            "tasks": [t.to_dict() for t in tasks],
+        }
+        serialized = json.dumps(payload, indent=2, ensure_ascii=False)
+
+        # Atomic write: write to temp then rename
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=self._path.parent, prefix=".taskman_tmp_"
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(serialized)
+                os.replace(tmp_path, self._path)
+            except Exception:
+                os.unlink(tmp_path)
+                raise
+        except OSError as exc:
+            log.error("Failed to save tasks: %s", exc)
+            raise RuntimeError(f"Cannot save task data: {exc}") from exc
+
+        log.debug("Saved %d task(s) to %s", len(tasks), self._path)
+
+
+# ──────────────────────────────────────────────────────────────
+# Service Layer
+# ──────────────────────────────────────────────────────────────
+
+class TaskService:
+    def __init__(self, storage: Storage) -> None:
+        self._storage = storage
+
+    # ── internal ──────────────────────────────────────────────
+
+    def _load(self) -> list[Task]:
+        return self._storage.load()
+
+    def _save(self, tasks: list[Task]) -> None:
+        self._storage.save(tasks)
+
+    def _find(self, tasks: list[Task], task_id: str) -> Task:
+        matches = [t for t in tasks if t.id == task_id]
+        if not matches:
+            raise LookupError(f"No task found with id '{task_id}'.")
+        return matches[0]
+
+    # ── public API ────────────────────────────────────────────
+
+    def add(
+        self,
+        title: str,
+        priority: str = "medium",
+        due: Optional[str] = None,
+    ) -> Task:
+        task = Task(title=title, priority=Priority(priority), due=due)
+        tasks = self._load()
+        tasks.append(task)
+        self._save(tasks)
+        log.info("Added task %s: %r", task.id, task.title)
+        return task
+
+    def list_tasks(
+        self,
+        status: Optional[str] = None,
+        priority: Optional[str] = None,
+    ) -> list[Task]:
+        tasks = self._load()
+        if status:
+            tasks = [t for t in tasks if t.status == Status(status)]
+        if priority:
+            tasks = [t for t in tasks if t.priority == Priority(priority)]
+        return tasks
+
+    def mark_done(self, task_id: str) -> Task:
+        tasks = self._load()
+        task = self._find(tasks, task_id)
+        if task.status == Status.DONE:
+            raise ValueError(f"Task '{task_id}' is already done.")
+        task.status = Status.DONE
+        task.mark_updated()
+        self._save(tasks)
+        log.info("Marked task %s as done.", task_id)
+        return task
+
+    def delete(self, task_id: str) -> Task:
+        tasks = self._load()
+        task = self._find(tasks, task_id)
+        tasks.remove(task)
+        self._save(tasks)
+        log.info("Deleted task %s.", task_id)
+        return task
+
+    def edit(
+        self,
+        task_id: str,
+        title: Optional[str] = None,
+        priority: Optional[str] = None,
+        due: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> Task:
+        if not any([title, priority, due, status]):
+            raise ValueError("Provide at least one field to edit.")
+        tasks = self._load()
+        task = self._find(tasks, task_id)
+        if title is not None:
+            task.title = title
+        if priority is not None:
+            task.priority = Priority(priority)
+        if due is not None:
+            task.due = due
+        if status is not None:
+            task.status = Status(status)
+        task._validate()
+        task.mark_updated()
+        self._save(tasks)
+        log.info("Edited task %s.", task_id)
+        return task
+
+    def clear(self) -> int:
+        tasks = self._load()
+        count = len(tasks)
+        self._save([])
+        log.info("Cleared all %d task(s).", count)
+        return count
+
+
+# ──────────────────────────────────────────────────────────────
+# Terminal UI  (no third-party deps)
+# ──────────────────────────────────────────────────────────────
+
+RESET = "\033[0m"
+BOLD  = "\033[1m"
+DIM   = "\033[2m"
+
+RED    = "\033[91m"
+GREEN  = "\033[92m"
+YELLOW = "\033[93m"
+BLUE   = "\033[94m"
+CYAN   = "\033[96m"
+WHITE  = "\033[97m"
+GRAY   = "\033[90m"
+
+_NO_COLOR = not sys.stdout.isatty() or os.environ.get("NO_COLOR")
+
+
+def _c(code: str, text: str) -> str:
+    return text if _NO_COLOR else f"{code}{text}{RESET}"
+
+
+PRIORITY_COLOR = {
+    Priority.LOW:    GRAY,
+    Priority.MEDIUM: CYAN,
+    Priority.HIGH:   RED,
+}
+
+PRIORITY_ICON = {
+    Priority.LOW:    "↓",
+    Priority.MEDIUM: "·",
+    Priority.HIGH:   "↑",
+}
+
+
+def _fmt_due(task: Task) -> str:
+    if task.due is None:
+        return _c(GRAY, "—")
+    if task.is_overdue():
+        return _c(RED, f"⚠ {task.due}")
+    return _c(YELLOW, task.due)
+
+
+def _fmt_status(task: Task) -> str:
+    if task.status == Status.DONE:
+        return _c(GREEN, "✓ done")
+    return _c(BLUE, "○ pending")
+
+
+def print_task_table(tasks: list[Task]) -> None:
+    if not tasks:
+        print(_c(GRAY, "  No tasks found."))
+        return
+
+    # Column widths
+    id_w    = 8
+    pri_w   = 8
+    status_w = 10
+    due_w   = 12
+    title_w = max((len(t.title) for t in tasks), default=20)
+    title_w = min(max(title_w, 20), 60)
+
+    header = (
+        f"  {'ID':<{id_w}}  {'PRI':<{pri_w}}  {'STATUS':<{status_w}}"
+        f"  {'DUE':<{due_w}}  {'TITLE'}"
+    )
+    sep = "  " + "─" * (id_w + pri_w + status_w + due_w + title_w + 12)
+
+    print(_c(BOLD + WHITE, header))
+    print(_c(GRAY, sep))
+
+    for task in tasks:
+        pri_col  = PRIORITY_COLOR[task.priority]
+        pri_str  = _c(pri_col, f"{PRIORITY_ICON[task.priority]} {task.priority:<6}")
+        id_str   = _c(GRAY, task.id)
+        status   = _fmt_status(task)
+        due      = _fmt_due(task)
+        title    = task.title
+        if task.status == Status.DONE:
+            title = _c(DIM, title)
+        elif task.is_overdue():
+            title = _c(RED, title)
+
+        print(f"  {id_str}  {pri_str}  {status:<10}  {due:<12}  {title}")
+
+    print()
+    done_count    = sum(1 for t in tasks if t.status == Status.DONE)
+    pending_count = len(tasks) - done_count
+    overdue_count = sum(1 for t in tasks if t.is_overdue())
+
+    summary_parts = [
+        _c(WHITE, f"{len(tasks)} total"),
+        _c(BLUE,  f"{pending_count} pending"),
+        _c(GREEN, f"{done_count} done"),
+    ]
+    if overdue_count:
+        summary_parts.append(_c(RED, f"{overdue_count} overdue"))
+    print("  " + "  •  ".join(summary_parts))
+
+
+def print_success(msg: str) -> None:
+    print(_c(GREEN, f"  ✓ {msg}"))
+
+
+def print_error(msg: str) -> None:
+    print(_c(RED, f"  ✗ {msg}"), file=sys.stderr)
+
+
+# ──────────────────────────────────────────────────────────────
+# CLI (argparse)
+# ──────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="taskman",
+        description="A production-grade CLI task manager.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    sub = parser.add_subparsers(dest="command", metavar="<command>")
+
+    # add
+    p_add = sub.add_parser("add", help="Add a new task.")
+    p_add.add_argument("title", help="Task description (max 200 chars).")
+    p_add.add_argument(
+        "--priority", "-p",
+        choices=["low", "medium", "high"],
+        default="medium",
+        help="Task priority (default: medium).",
+    )
+    p_add.add_argument(
+        "--due", "-d",
+        metavar="YYYY-MM-DD",
+        help="Optional due date.",
+    )
+
+    # list
+    p_list = sub.add_parser("list", aliases=["ls"], help="List tasks.")
+    p_list.add_argument(
+        "--status", "-s",
+        choices=["pending", "done"],
+        help="Filter by status.",
+    )
+    p_list.add_argument(
+        "--priority", "-p",
+        choices=["low", "medium", "high"],
+        help="Filter by priority.",
+    )
+
+    # done
+    p_done = sub.add_parser("done", help="Mark a task as done.")
+    p_done.add_argument("id", help="Task ID (8-char hex).")
+
+    # delete
+    p_del = sub.add_parser("delete", aliases=["rm"], help="Delete a task.")
+    p_del.add_argument("id", help="Task ID.")
+
+    # edit
+    p_edit = sub.add_parser("edit", help="Edit a task.")
+    p_edit.add_argument("id", help="Task ID.")
+    p_edit.add_argument("--title",    "-t",  help="New title.")
+    p_edit.add_argument("--priority", "-p",  choices=["low", "medium", "high"])
+    p_edit.add_argument("--due",      "-d",  metavar="YYYY-MM-DD")
+    p_edit.add_argument("--status",   "-s",  choices=["pending", "done"])
+
+    # clear
+    p_clear = sub.add_parser("clear", help="Delete ALL tasks.")
+    p_clear.add_argument(
+        "--force", "-f",
+        action="store_true",
+        help="Skip confirmation prompt.",
+    )
+
+    return parser
+
+
+# ──────────────────────────────────────────────────────────────
+# Command Handlers
+# ──────────────────────────────────────────────────────────────
+
+def cmd_add(svc: TaskService, args: argparse.Namespace) -> int:
+    task = svc.add(title=args.title, priority=args.priority, due=args.due)
+    print_success(f"Task added  [{task.id}]  {task.title!r}")
+    return 0
+
+
+def cmd_list(svc: TaskService, args: argparse.Namespace) -> int:
+    tasks = svc.list_tasks(status=args.status, priority=args.priority)
+    print()
+    print_task_table(tasks)
+    return 0
+
+
+def cmd_done(svc: TaskService, args: argparse.Namespace) -> int:
+    task = svc.mark_done(args.id)
+    print_success(f"Marked done [{task.id}]  {task.title!r}")
+    return 0
+
+
+def cmd_delete(svc: TaskService, args: argparse.Namespace) -> int:
+    task = svc.delete(args.id)
+    print_success(f"Deleted     [{task.id}]  {task.title!r}")
+    return 0
+
+
+def cmd_edit(svc: TaskService, args: argparse.Namespace) -> int:
+    task = svc.edit(
+        task_id=args.id,
+        title=args.title,
+        priority=args.priority,
+        due=args.due,
+        status=args.status,
+    )
+    print_success(f"Updated     [{task.id}]  {task.title!r}")
+    return 0
+
+
+def cmd_clear(svc: TaskService, args: argparse.Namespace) -> int:
+    if not args.force:
+        answer = input("  Delete ALL tasks? This cannot be undone. [y/N] ").strip().lower()
+        if answer != "y":
+            print(_c(GRAY, "  Aborted."))
+            return 0
+    count = svc.clear()
+    print_success(f"Cleared {count} task(s).")
+    return 0
+
+
+HANDLERS = {
+    "add":    cmd_add,
+    "list":   cmd_list,
+    "ls":     cmd_list,
+    "done":   cmd_done,
+    "delete": cmd_delete,
+    "rm":     cmd_delete,
+    "edit":   cmd_edit,
+    "clear":  cmd_clear,
+}
+
+
+# ──────────────────────────────────────────────────────────────
+# Entry Point
+# ──────────────────────────────────────────────────────────────
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command is None:
+        parser.print_help()
+        return 0
+
+    svc = TaskService(Storage())
+    handler = HANDLERS.get(args.command)
+    if handler is None:
+        parser.print_help()
+        return 1
+
+    try:
+        return handler(svc, args)
+    except (LookupError, ValueError) as exc:
+        print_error(str(exc))
+        log.warning("User error in command '%s': %s", args.command, exc)
+        return 1
+    except RuntimeError as exc:
+        print_error(f"Storage error: {exc}")
+        log.error("Storage error in command '%s': %s", args.command, exc, exc_info=True)
+        return 2
+    except KeyboardInterrupt:
+        print()
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

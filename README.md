@@ -71,7 +71,7 @@ At least one monitor is wired to **Datadog Incident Management** so that when a 
 - Docker (container packaging)
 
 ---
-
+Please conduct a smoke test before going further!!
 ## Live Demo
 
 - Hosted API (Cloud Run):  
